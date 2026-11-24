@@ -4,8 +4,11 @@ import streamlit as st
 import unicodedata
 import base64
 import os
+import uuid
 from datetime import datetime
 import numpy as np
+
+from registro_log import registrar_evento, leer_log, ARCHIVO_LOG
 
 # ==================== CONFIGURACIÓN DE LA PÁGINA ====================
 
@@ -17,7 +20,6 @@ st.set_page_config(
 
 # ==================== INICIALIZACIÓN DE SESSION STATE ====================
 
-# Inicializar variables de sesión para mantener datos entre páginas
 if 'recomendacion_generada' not in st.session_state:
     st.session_state.recomendacion_generada = False
 
@@ -39,6 +41,42 @@ if 'distrito_cliente' not in st.session_state:
 if 'sexo_cliente' not in st.session_state:
     st.session_state.sexo_cliente = "Masculino"
 
+# --- Variables para el registro (LOG) ---
+if 'sesion_id' not in st.session_state:
+    st.session_state.sesion_id = str(uuid.uuid4())[:8]
+
+if 'ultima_cotizacion_registrada' not in st.session_state:
+    st.session_state.ultima_cotizacion_registrada = None
+
+if 'ultimo_menu' not in st.session_state:
+    st.session_state.ultimo_menu = None
+
+if 'usuario' not in st.session_state:
+    st.session_state.usuario = ""
+
+# ==================== PANTALLA DE IDENTIFICACIÓN ====================
+
+if not st.session_state.usuario:
+    st.markdown(
+        """
+        <div style="text-align:center; background-color:#00BFFF; color:white; padding:20px; border-radius:10px; margin-bottom:20px;">
+            <h2>🏥 PACÍFICO SEGUROS</h2>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    st.title("🔐 Identificación de Usuario")
+    st.info("Por favor, ingresa tu nombre y apellido para acceder al Sistema de Recomendación y Calculadora.")
+    nombre_input = st.text_input("Nombre y Apellido:", placeholder="Ej. Juan Pérez")
+    if st.button("Ingresar", type="primary"):
+        if nombre_input.strip():
+            st.session_state.usuario = nombre_input.strip()
+            registrar_evento("Inicio de sesión", st.session_state.sesion_id, usuario=st.session_state.usuario)
+            st.rerun()
+        else:
+            st.warning("⚠️ Debes ingresar un nombre válido para continuar.")
+    st.stop()
+
 # ==================== FUNCIONES AUXILIARES ====================
 
 def normalizar_texto(texto):
@@ -50,7 +88,6 @@ def cargar_tarifas():
     """Carga las tarifas base desde el archivo Excel"""
     try:
         df_tarifas = pd.read_excel('tarifario_base.xlsx')
-        # Validar columnas requeridas
         columnas_requeridas = ['RangoEtario']
         for col in columnas_requeridas:
             if col not in df_tarifas.columns:
@@ -70,7 +107,6 @@ def cargar_campanas():
         df_campanas = pd.read_excel('campanas.xlsx')
         return df_campanas
     except:
-        # Campañas por defecto si no existe el archivo
         return pd.DataFrame({
             'Nombre': ['Campaña ESENCIAL', 'Campaña CONTINUIDAD'],
             'Fecha_Inicio': [datetime(2024, 10, 20), datetime(2024, 10, 20)],
@@ -82,15 +118,7 @@ def cargar_campanas():
         })
 
 def validar_edad_sin_continuidad(plan, edad):
-    """
-    Valida si la edad es aceptable para el plan cuando NO hay continuidad
-    
-    Restricciones sin continuidad:
-    - MSLD, MINT, MNAC, AM05: máximo 65 años
-    - AM18, AM17, AM15: máximo 60 años
-    
-    Retorna: (es_valido, mensaje)
-    """
+    """Valida si la edad es aceptable para el plan cuando NO hay continuidad"""
     planes_65 = ['MSLD', 'MINT', 'MNAC', 'AM05']
     planes_60 = ['AM18', 'AM17', 'AM15']
     
@@ -104,16 +132,10 @@ def validar_edad_sin_continuidad(plan, edad):
             return False, f"⚠️ Sin continuidad, la edad máxima para {plan} es 60 años"
         return True, ""
     
-    # Para otros planes o con continuidad, no hay restricción
     return True, ""
 
 def obtener_planes_alternativos(plan_principal, edad, tiene_continuidad):
-    """
-    Obtiene planes alternativos válidos según la edad y continuidad
-    
-    Retorna: (segunda_opcion, tercera_opcion)
-    """
-    # Definir todas las opciones posibles
+    """Obtiene planes alternativos válidos según la edad y continuidad"""
     if plan_principal == "MNAC":
         opciones = ["MSLD", "AM15", "MINT"]
     elif plan_principal == "MSLD":
@@ -125,36 +147,24 @@ def obtener_planes_alternativos(plan_principal, edad, tiene_continuidad):
     else:
         opciones = ["MSLD", "AM15", "AM05"]
     
-    # Filtrar opciones válidas según continuidad y edad
     opciones_validas = []
     for plan in opciones:
         es_valido, _ = validar_edad_sin_continuidad(plan, edad)
         if tiene_continuidad == "Sí" or es_valido:
             opciones_validas.append(plan)
     
-    # Retornar las dos primeras opciones válidas (o None si no hay)
     segunda = opciones_validas[0] if len(opciones_validas) > 0 else None
     tercera = opciones_validas[1] if len(opciones_validas) > 1 else None
     
     return segunda, tercera
 
 def calcular_pago_financiado(valor_presente, tasa_anual, num_cuotas):
-    """
-    Calcula el pago periódico usando la fórmula de Excel PAGO()
-    
-    Parámetros:
-    - valor_presente: Monto total de la prima anual
-    - tasa_anual: Tasa de interés anual (ej: 0.04 para 4%)
-    - num_cuotas: Número de cuotas (12, 10, 6, 4)
-    
-    Retorna: Monto de cuota mensual
-    """
+    """Calcula el pago periódico usando la fórmula de Excel PAGO()"""
     if num_cuotas == 1:
         return valor_presente
     
     tasa_mensual = tasa_anual / 12
     
-    # Fórmula PAGO: pago = VP * (tasa * (1 + tasa)^n) / ((1 + tasa)^n - 1)
     if tasa_mensual == 0:
         return valor_presente / num_cuotas
     
@@ -164,26 +174,14 @@ def calcular_pago_financiado(valor_presente, tasa_anual, num_cuotas):
     return pago_mensual
 
 def obtener_tarifa_base(df_tarifas, plan, edad, es_hijo=False):
-    """
-    Obtiene la tarifa base según plan, edad y si es hijo
-    
-    Parámetros:
-    - df_tarifas: DataFrame con las tarifas
-    - plan: Código del plan (MINT, MNAC, etc.)
-    - edad: Edad del asegurado
-    - es_hijo: Boolean indicando si es hijo o titular
-    
-    Retorna: Tarifa base anual
-    """
+    """Obtiene la tarifa base según plan, edad y si es hijo"""
     if df_tarifas is None:
         return None
     
-    # Validar que el plan existe en el tarifario
     if plan not in df_tarifas.columns:
         st.warning(f"⚠️ El plan {plan} no existe en el tarifario")
         return None
     
-    # Determinar el rango etario
     if es_hijo:
         if edad <= 17:
             rango = 'Hijos 0 - 17 años'
@@ -192,8 +190,6 @@ def obtener_tarifa_base(df_tarifas, plan, edad, es_hijo=False):
         elif edad == 26:
             rango = 'Hijos 26 años'
         else:
-            # CORRECCIÓN: Para hijos mayores de 26 años, usar la edad específica
-            # Ejemplo: hijo de 27 años -> buscar "27 años" en el tarifario
             rango = f'{edad} años'
     else:
         if edad <= 17:
@@ -203,7 +199,6 @@ def obtener_tarifa_base(df_tarifas, plan, edad, es_hijo=False):
         else:
             rango = f'{edad} años'
     
-    # Buscar la tarifa en el DataFrame
     try:
         fila = df_tarifas[df_tarifas['RangoEtario'] == rango]
         if not fila.empty and plan in fila.columns:
@@ -215,27 +210,19 @@ def obtener_tarifa_base(df_tarifas, plan, edad, es_hijo=False):
         return None
 
 def aplicar_descuento_campana(df_campanas, plan, tarifa_base, tiene_continuidad):
-    """
-    Aplica descuento de campaña vigente según si tiene continuidad o no
-    
-    Retorna: (tarifa_con_descuento, porcentaje_descuento, nombre_campana)
-    """
+    """Aplica descuento de campaña vigente según si tiene continuidad o no"""
     if df_campanas is None or df_campanas.empty:
         return tarifa_base, 0, None
     
     fecha_actual = datetime.now()
-    
-    # Determinar el tipo de campaña a buscar
     tipo_campana = 'Continuidad' if tiene_continuidad == "Sí" else 'General'
     
-    # Buscar campañas vigentes del tipo correspondiente
     campanas_vigentes = df_campanas[
         (df_campanas['Fecha_Inicio'] <= fecha_actual) & 
         (df_campanas['Fecha_Fin'] >= fecha_actual) &
         (df_campanas['Tipo_Campana'] == tipo_campana)
     ]
     
-    # Si no hay campaña específica de continuidad, buscar campaña general
     if campanas_vigentes.empty and tipo_campana == 'Continuidad':
         campanas_vigentes = df_campanas[
             (df_campanas['Fecha_Inicio'] <= fecha_actual) & 
@@ -246,7 +233,6 @@ def aplicar_descuento_campana(df_campanas, plan, tarifa_base, tiene_continuidad)
     if campanas_vigentes.empty:
         return tarifa_base, 0, None
     
-    # Tomar la primera campaña vigente
     campana = campanas_vigentes.iloc[0]
     
     if plan in campana and pd.notna(campana[plan]):
@@ -324,33 +310,40 @@ except:
 
 st.title("Sistema de recomendación productos integrales")
 
-# Cargar datos
 df_tarifas = cargar_tarifas()
 df_campanas = cargar_campanas()
 
 # ==================== MENÚ DE NAVEGACIÓN ====================
 
+st.sidebar.success(f"👤 Usuario: {st.session_state.usuario}")
+
 menu = st.sidebar.radio(
     "📋 Menú Principal",
-    ["🎯 Recomendador de Plan", "💰 Calculadora de Tarifas", "📊 Campañas Vigentes", "📚 Recursos"]
+    ["🎯 Recomendador de Plan", "💰 Calculadora de Tarifas", "📊 Campañas Vigentes", "📚 Recursos", "📜 Registro de Uso"]
 )
+
+if menu != st.session_state.ultimo_menu:
+    if menu == "💰 Calculadora de Tarifas":
+        registrar_evento(
+            "Ingreso a calculadora",
+            st.session_state.sesion_id,
+            usuario=st.session_state.usuario
+        )
+    st.session_state.ultimo_menu = menu
 
 # ==================== MÓDULO 1: RECOMENDADOR DE PLAN ====================
 
 if menu == "🎯 Recomendador de Plan":
     st.sidebar.header("Información del Cliente")
     
-    # NUEVO: Campo de Continuidad
     tiene_continuidad = st.sidebar.selectbox(
         "¿Cuenta con continuidad?",
         ["No", "Sí"],
         help="La continuidad indica si el cliente viene de otro seguro de salud"
     )
     
-    # Guardar en session_state
     st.session_state.tiene_continuidad = tiene_continuidad
     
-    # Mostrar información sobre continuidad
     if tiene_continuidad == "Sí":
         st.sidebar.success("✅ Con continuidad: Sin restricción de edad")
     else:
@@ -387,14 +380,13 @@ if menu == "🎯 Recomendador de Plan":
 
     if st.sidebar.button("Generar Recomendación", type="primary"):
         with st.spinner('🔍 Analizando perfil del cliente...'):
-            # Lógica de recomendación
             plan = "MSLD"
 
             if Distrito in ["MIRAFLORES", "SAN ISIDRO", "LA MOLINA", "SANTIAGO DE SURCO"]:
                 if Sexo == "Masculino":
                     plan = "MNAC" if Edad >= 30 else "MSLD"
                 else:
-                    plan = "MNAC" if Edad > 30 else "MSLD"  # Corregido: era MLSD
+                    plan = "MNAC" if Edad > 30 else "MSLD"
 
             elif Distrito in ["LOS OLIVOS", "SAN JUAN DE LURIGANCHO", "SAN JUAN DE MIRAFLORES"]:
                 if Sexo == "Femenino":
@@ -407,13 +399,11 @@ if menu == "🎯 Recomendador de Plan":
                 else:
                     plan = "AM15" if Edad < 30 else "MSLD"
 
-            # NUEVO: Validar edad según continuidad
             es_valido, mensaje_error = validar_edad_sin_continuidad(plan, Edad)
             
             if not es_valido:
                 st.error(mensaje_error)
                 st.warning("💡 **Sugerencia:** El cliente necesita continuidad para acceder a este plan, o considera planes alternativos.")
-                # Intentar encontrar un plan alternativo válido
                 planes_alternativos = ['AM15', 'AM17', 'AM18', 'AM05', 'MSLD', 'MNAC', 'MINT']
                 for plan_alt in planes_alternativos:
                     es_valido_alt, _ = validar_edad_sin_continuidad(plan_alt, Edad)
@@ -422,14 +412,23 @@ if menu == "🎯 Recomendador de Plan":
                         st.info(f"✅ Plan ajustado a: {plan}")
                         break
             
-            # Guardar en session_state
             st.session_state.plan_recomendado = plan
             st.session_state.recomendacion_generada = True
+
+            # REGISTRO (LOG): recomendación generada
+            registrar_evento(
+                "Recomendación generada",
+                st.session_state.sesion_id,
+                usuario=st.session_state.usuario,
+                plan=plan,
+                continuidad=tiene_continuidad,
+                num_asegurados=Numero_dependientes,
+                edades=str(Edad),
+                detalle=f"{Sexo}, {Distrito_display}"
+            )
             
-            # Obtener planes alternativos válidos
             segunda_opcion, tercera_opcion = obtener_planes_alternativos(plan, Edad, tiene_continuidad)
             
-            # Nombres de los planes (solo siglas)
             nombres_planes = {
                 'MNAC': 'MNAC',
                 'MSLD': 'MSLD',
@@ -441,7 +440,6 @@ if menu == "🎯 Recomendador de Plan":
                 'MINT': 'MINT'
             }
             
-            # Mostrar resultado - Plan Recomendado (Grande)
             st.success("✅ Recomendación generada exitosamente")
             
             st.markdown(
@@ -458,16 +456,13 @@ if menu == "🎯 Recomendador de Plan":
                 unsafe_allow_html=True
             )
             
-            # Mostrar información de continuidad aplicada
             if tiene_continuidad == "Sí":
                 st.info("ℹ️ **Campaña de Continuidad:** Este cliente califica para descuentos especiales por continuidad")
             
-            # Opciones alternativas
             st.markdown("### 🔄 Opciones Alternativas")
             
             col1, col2 = st.columns(2)
             
-            # Segunda opción (mediano)
             if segunda_opcion:
                 with col1:
                     st.markdown(
@@ -487,7 +482,6 @@ if menu == "🎯 Recomendador de Plan":
                         unsafe_allow_html=True
                     )
             
-            # Tercera opción (pequeño)
             if tercera_opcion:
                 with col2:
                     st.markdown(
@@ -509,7 +503,6 @@ if menu == "🎯 Recomendador de Plan":
             
             st.markdown("---")
             
-            # Información adicional del cliente
             st.markdown("### 📋 Detalles de la Recomendación")
             col1, col2, col3, col4 = st.columns(4)
             
@@ -523,7 +516,6 @@ if menu == "🎯 Recomendador de Plan":
                 continuidad_icon = "✅" if tiene_continuidad == "Sí" else "❌"
                 st.info(f"**Continuidad:** {continuidad_icon} {tiene_continuidad}")
             
-            # Llamado a acción para cotización
             st.markdown(
                 """
                 <div style="background-color:#d1ecf1; padding:20px; border-radius:10px; border-left:5px solid #0c5460; margin:20px 0;">
@@ -537,7 +529,6 @@ if menu == "🎯 Recomendador de Plan":
                 unsafe_allow_html=True
             )
 
-            # Registro de gestión
             st.markdown("### 🎯 Siguiente Paso")
             st.markdown(
                 """
@@ -559,30 +550,29 @@ if menu == "🎯 Recomendador de Plan":
         
         st.markdown("#### 📋 Instrucciones:")
         st.write("""
-        1. **Completa la información** del cliente en el panel lateral
-        2. **Indica si tiene continuidad** (viene de otro seguro)
-        3. **Haz clic en 'Generar Recomendación'** para obtener el plan sugerido
-        4. **Revisa los detalles** del plan recomendado
-        5. **Ve a la Calculadora de Tarifas** para cotizar (datos ya cargados)
-        6. **Registra la gestión** según el resultado de la propuesta
+1. **Completa la información** del cliente en el panel lateral
+2. **Indica si tiene continuidad** (viene de otro seguro)
+3. **Haz clic en 'Generar Recomendación'** para obtener el plan sugerido
+4. **Revisa los detalles** del plan recomendado
+5. **Ve a la Calculadora de Tarifas** para cotizar (datos ya cargados)
+6. **Registra la gestión** según el resultado de la propuesta
         """)
         
-        # Mostrar información sobre continuidad
         st.markdown("#### ℹ️ Sobre la Continuidad:")
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("""
             **Con Continuidad (Sí):**
-            - ✅ Sin restricción de edad
-            - ✅ Descuentos especiales (15%)
-            - ✅ Más opciones de planes
+- ✅ Sin restricción de edad
+- ✅ Descuentos especiales (15%)
+- ✅ Más opciones de planes
             """)
         with col2:
             st.markdown("""
             **Sin Continuidad (No):**
-            - ⚠️ Edad máxima 65 años (MSLD, MINT, MNAC, AM05)
-            - ⚠️ Edad máxima 60 años (AM18, AM17, AM15)
-            - 📊 Descuentos estándar
+- ⚠️ Edad máxima 65 años (MSLD, MINT, MNAC, AM05)
+- ⚠️ Edad máxima 60 años (AM18, AM17, AM15)
+- 📊 Descuentos estándar
             """)
 
 # ==================== MÓDULO 2: CALCULADORA DE TARIFAS ====================
@@ -593,7 +583,6 @@ elif menu == "💰 Calculadora de Tarifas":
     if df_tarifas is None:
         st.error("⚠️ No se pudo cargar el archivo de tarifas. Verifica que 'tarifario_base.xlsx' esté en la carpeta correcta.")
     else:
-        # NUEVO: Mostrar si hay datos pre-cargados de la recomendación
         if st.session_state.recomendacion_generada:
             st.success("✅ Datos cargados desde la recomendación anterior")
             
@@ -605,7 +594,6 @@ elif menu == "💰 Calculadora de Tarifas":
             with col3:
                 st.info(f"**Afiliados:** {st.session_state.numero_afiliados}")
             
-            # Opción para resetear
             if st.button("🔄 Empezar cotización nueva", help="Limpia los datos pre-cargados"):
                 st.session_state.recomendacion_generada = False
                 st.session_state.plan_recomendado = None
@@ -613,10 +601,8 @@ elif menu == "💰 Calculadora de Tarifas":
         
         st.markdown("### 📝 Datos de la Cotización")
         
-        # Selección de plan (usar el recomendado si existe)
         planes_disponibles = [col for col in df_tarifas.columns if col != 'RangoEtario']
         
-        # Determinar índice por defecto
         if st.session_state.recomendacion_generada and st.session_state.plan_recomendado:
             try:
                 index_default = planes_disponibles.index(st.session_state.plan_recomendado)
@@ -627,7 +613,6 @@ elif menu == "💰 Calculadora de Tarifas":
         
         plan_seleccionado = st.selectbox("Plan de Seguro", planes_disponibles, index=index_default)
         
-        # Configuración de cuotas
         col1, col2 = st.columns(2)
         with col1:
             num_cuotas = st.selectbox("Número de Cuotas", [1, 4, 6, 10, 12], index=4)
@@ -638,11 +623,9 @@ elif menu == "💰 Calculadora de Tarifas":
         st.markdown("---")
         st.markdown("### 👥 Asegurados")
         
-        # Número de asegurados (usar el de la recomendación si existe)
         num_asegurados_default = st.session_state.numero_afiliados if st.session_state.recomendacion_generada else 1
         num_asegurados = st.number_input("Número de asegurados", min_value=1, max_value=10, value=num_asegurados_default)
         
-        # Recopilar datos de cada asegurado
         asegurados = []
         total_prima = 0
         
@@ -652,7 +635,6 @@ elif menu == "💰 Calculadora de Tarifas":
             
             with col1:
                 if i == 0:
-                    # El primer asegurado siempre es Titular (no editable)
                     st.text_input(
                         f"Relación de parentesco",
                         value="Titular",
@@ -661,7 +643,6 @@ elif menu == "💰 Calculadora de Tarifas":
                     )
                     relacion = "Titular"
                 else:
-                    # Los demás pueden elegir
                     relacion = st.selectbox(
                         f"Relación de parentesco",
                         ["Hijo", "Cónyuge", "Otro"],
@@ -669,7 +650,6 @@ elif menu == "💰 Calculadora de Tarifas":
                     )
             
             with col2:
-                # NUEVO: Usar edad del titular si es el primero y hay recomendación
                 if i == 0 and st.session_state.recomendacion_generada:
                     edad_default = st.session_state.edad_titular
                 else:
@@ -683,19 +663,16 @@ elif menu == "💰 Calculadora de Tarifas":
                     key=f"edad_{i}"
                 )
             
-            # NUEVO: Validar edad según continuidad para el titular
             if i == 0 and st.session_state.tiene_continuidad == "No":
                 es_valido, mensaje_error = validar_edad_sin_continuidad(plan_seleccionado, edad)
                 if not es_valido:
                     st.error(mensaje_error)
                     st.warning("⚠️ Considera cambiar el plan o verificar si el cliente tiene continuidad")
             
-            # Obtener tarifa
             es_hijo = (relacion == "Hijo")
             tarifa_base = obtener_tarifa_base(df_tarifas, plan_seleccionado, edad, es_hijo)
             
             if tarifa_base:
-                # Aplicar descuento de campaña (usando la continuidad guardada)
                 tarifa_desc, desc_pct, campana = aplicar_descuento_campana(
                     df_campanas, 
                     plan_seleccionado, 
@@ -729,16 +706,37 @@ elif menu == "💰 Calculadora de Tarifas":
             
             st.markdown("---")
         
-        # Resumen total
         if total_prima > 0:
             st.markdown("### 💳 Resumen de Cotización")
             
-            # Calcular cuota mensual
             cuota_mensual = calcular_pago_financiado(total_prima, tasa_interes, num_cuotas)
             total_financiado = cuota_mensual * num_cuotas
             costo_financiamiento = total_financiado - total_prima
+
+            # REGISTRO (LOG): cotización calculada
+            firma = (
+                plan_seleccionado,
+                tuple((a['relacion'], a['edad']) for a in asegurados),
+                num_cuotas,
+                tasa_interes,
+                st.session_state.tiene_continuidad,
+            )
+            if firma != st.session_state.ultima_cotizacion_registrada:
+                registrar_evento(
+                    "Cotización calculada",
+                    st.session_state.sesion_id,
+                    usuario=st.session_state.usuario,
+                    plan=plan_seleccionado,
+                    continuidad=st.session_state.tiene_continuidad,
+                    num_asegurados=len(asegurados),
+                    edades=", ".join(f"{a['relacion']}:{a['edad']}" for a in asegurados),
+                    prima_total=round(total_prima, 2),
+                    num_cuotas=num_cuotas,
+                    financiamiento=tipo_financiamiento,
+                    cuota_mensual=round(cuota_mensual, 2),
+                )
+                st.session_state.ultima_cotizacion_registrada = firma
             
-            # Mostrar métricas
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
@@ -750,13 +748,11 @@ elif menu == "💰 Calculadora de Tarifas":
             with col4:
                 st.metric("Costo Financiamiento", f"S/ {costo_financiamiento:,.2f}")
             
-            # Mostrar información de campaña aplicada
             if asegurados[0]['descuento_pct'] > 0:
                 campana_aplicada = asegurados[0]['campana']
                 tipo_campana = "Continuidad" if st.session_state.tiene_continuidad == "Sí" else "General"
                 st.info(f"🎉 **Campaña aplicada:** {campana_aplicada} ({tipo_campana}) - Ahorro: S/ {(sum([a['tarifa_base'] for a in asegurados]) - total_prima):,.2f}")
             
-            # Tabla detallada
             st.markdown("#### 📊 Detalle por Asegurado")
             df_resumen = pd.DataFrame(asegurados)
             df_resumen['tarifa_base'] = df_resumen['tarifa_base'].apply(lambda x: f"S/ {x:,.2f}")
@@ -767,7 +763,6 @@ elif menu == "💰 Calculadora de Tarifas":
             
             st.dataframe(df_resumen, use_container_width=True)
             
-            # Tabla de amortización resumida
             if num_cuotas > 1:
                 st.markdown("#### 📅 Plan de Pagos")
                 
@@ -791,16 +786,29 @@ elif menu == "💰 Calculadora de Tarifas":
                     df_pagos = pd.DataFrame(pagos_data)
                     st.dataframe(df_pagos, use_container_width=True)
             
-            # Botón para generar propuesta
             st.markdown("### 📄 Generar Propuesta")
             col1, col2 = st.columns(2)
             
             with col1:
                 if st.button("📥 Descargar Propuesta en PDF", type="primary"):
+                    registrar_evento(
+                        "Descarga PDF solicitada",
+                        st.session_state.sesion_id,
+                        usuario=st.session_state.usuario,
+                        plan=plan_seleccionado,
+                        prima_total=round(total_prima, 2)
+                    )
                     st.info("🚧 Funcionalidad en desarrollo. Próximamente podrás descargar la propuesta en formato PDF.")
             
             with col2:
                 if st.button("📧 Enviar por Email"):
+                    registrar_evento(
+                        "Envío email solicitado",
+                        st.session_state.sesion_id,
+                        usuario=st.session_state.usuario,
+                        plan=plan_seleccionado,
+                        prima_total=round(total_prima, 2)
+                    )
                     st.info("🚧 Funcionalidad en desarrollo. Próximamente podrás enviar la propuesta por correo.")
 
 # ==================== MÓDULO 3: CAMPAÑAS VIGENTES ====================
@@ -811,18 +819,15 @@ elif menu == "📊 Campañas Vigentes":
     if df_campanas is not None and not df_campanas.empty:
         fecha_actual = datetime.now()
         
-        # Filtrar campañas vigentes
         campanas_vigentes = df_campanas[
             (df_campanas['Fecha_Inicio'] <= fecha_actual) & 
             (df_campanas['Fecha_Fin'] >= fecha_actual)
         ]
         
         if not campanas_vigentes.empty:
-            # Separar por tipo de campaña
             campanas_generales = campanas_vigentes[campanas_vigentes['Tipo_Campana'] == 'General']
             campanas_continuidad = campanas_vigentes[campanas_vigentes['Tipo_Campana'] == 'Continuidad']
             
-            # Mostrar campañas generales
             if not campanas_generales.empty:
                 st.markdown("### 🎯 Campañas Generales")
                 for idx, campana in campanas_generales.iterrows():
@@ -836,7 +841,6 @@ elif menu == "📊 Campañas Vigentes":
                     
                     st.markdown("##### 💎 Descuentos por Plan")
                     
-                    # Crear columnas para mostrar descuentos
                     planes = ['MINT', 'MNAC', 'MSLD', 'AM05', 'AM18', 'AM17', 'AM15']
                     cols = st.columns(len(planes))
                     
@@ -847,7 +851,6 @@ elif menu == "📊 Campañas Vigentes":
                     
                     st.markdown("---")
             
-            # Mostrar campañas de continuidad
             if not campanas_continuidad.empty:
                 st.markdown("### 🔄 Campañas de Continuidad")
                 st.info("✨ Estas campañas aplican solo para clientes que vienen de otro seguro de salud")
@@ -863,7 +866,6 @@ elif menu == "📊 Campañas Vigentes":
                     
                     st.markdown("##### 💎 Descuentos por Plan")
                     
-                    # Crear columnas para mostrar descuentos
                     planes = ['MINT', 'MNAC', 'MSLD', 'AM05', 'AM18', 'AM17', 'AM15']
                     cols = st.columns(len(planes))
                     
@@ -876,7 +878,6 @@ elif menu == "📊 Campañas Vigentes":
         else:
             st.warning("⚠️ No hay campañas vigentes en este momento")
             
-        # Mostrar próximas campañas
         campanas_futuras = df_campanas[df_campanas['Fecha_Inicio'] > fecha_actual]
         if not campanas_futuras.empty:
             st.markdown("### 📅 Próximas Campañas")
@@ -910,13 +911,13 @@ elif menu == "📚 Recursos":
             ### 📋 Información de Planes Disponibles
             
             **Planes Principales:**
-            - **MNAC**: Medicvida Nacional - Plan premium con cobertura nacional amplia
-            - **MINT**: Medicvida Internacional - Plan con cobertura internacional
-            - **MSLD**: Multisalud - Plan estándar versátil para diferentes perfiles
-            - **AM18**: Multisalud Base - Plan base con red preferente
-            - **AM17**: Salud Esencial Plus - Versión mejorada del plan esencial
-            - **AM15**: Salud Esencial - Plan económico con coberturas esenciales
-            - **AM05**: Red Preferente - Plan accesible con red preferente
+- **MNAC**: Medicvida Nacional - Plan premium con cobertura nacional amplia
+- **MINT**: Medicvida Internacional - Plan con cobertura internacional
+- **MSLD**: Multisalud - Plan estándar versátil para diferentes perfiles
+- **AM18**: Multisalud Base - Plan base con red preferente
+- **AM17**: Salud Esencial Plus - Versión mejorada del plan esencial
+- **AM15**: Salud Esencial - Plan económico con coberturas esenciales
+- **AM05**: Red Preferente - Plan accesible con red preferente
             
             *La cartilla completa con coberturas detalladas estará disponible próximamente.*
             """)
@@ -927,13 +928,13 @@ elif menu == "📚 Recursos":
         with st.expander("📞 Consejos para la Venta", expanded=True):
             st.markdown("""
             **✅ Mejores Prácticas:**
-            - Enfatiza los **beneficios específicos** del plan recomendado
-            - Explica las **diferencias entre planes** usando la cartilla
-            - Menciona la **cobertura por dependientes**
-            - Resalta las **redes de prestadores** disponibles
-            - Ofrece **formas de pago flexibles**
-            - Personaliza la propuesta según el **perfil del cliente**
-            - **Pregunta siempre por continuidad** para maximizar descuentos
+- Enfatiza los **beneficios específicos** del plan recomendado
+- Explica las **diferencias entre planes** usando la cartilla
+- Menciona la **cobertura por dependientes**
+- Resalta las **redes de prestadores** disponibles
+- Ofrece **formas de pago flexibles**
+- Personaliza la propuesta según el **perfil del cliente**
+- **Pregunta siempre por continuidad** para maximizar descuentos
             """)
         
         with st.expander("❓ Preguntas Frecuentes"):
@@ -964,15 +965,15 @@ elif menu == "📚 Recursos":
             La continuidad se refiere a que el cliente viene de otro seguro de salud sin interrupciones.
             
             **Ventajas de tener continuidad:**
-            - ✅ Sin restricción de edad de ingreso
-            - ✅ Descuentos especiales hasta 15%
-            - ✅ Más flexibilidad en la selección de planes
-            - ✅ Proceso de afiliación más ágil
+- ✅ Sin restricción de edad de ingreso
+- ✅ Descuentos especiales hasta 15%
+- ✅ Más flexibilidad en la selección de planes
+- ✅ Proceso de afiliación más ágil
             
             **Documentos requeridos para continuidad:**
-            - Certificado de cobertura del seguro anterior
-            - Carta de no adeudo (si aplica)
-            - Constancia de cese del seguro anterior
+- Certificado de cobertura del seguro anterior
+- Carta de no adeudo (si aplica)
+- Constancia de cese del seguro anterior
             
             **Importante:** La continuidad debe ser sin interrupciones mayores a 30 días.
             """)
@@ -986,7 +987,6 @@ elif menu == "📚 Recursos":
         Esta tabla muestra las edades máximas permitidas para cada plan cuando el cliente NO tiene continuidad:
         """)
         
-        # Crear tabla de validaciones
         validaciones_data = {
             'Plan': ['MSLD', 'MINT', 'MNAC', 'AM05', 'AM18', 'AM17', 'AM15'],
             'Nombre Comercial': [
@@ -1011,19 +1011,49 @@ elif menu == "📚 Recursos":
         ### 💡 Recomendaciones según validaciones
         
         **Si el cliente tiene más de 65 años sin continuidad:**
-        - Ofrecer planes AM18, AM17 o AM15 solo si tiene 60 años o menos
-        - Sugerir obtener continuidad de su seguro anterior
-        - Considerar otras alternativas de seguro
+- Ofrecer planes AM18, AM17 o AM15 solo si tiene 60 años o menos
+- Sugerir obtener continuidad de su seguro anterior
+- Considerar otras alternativas de seguro
         
         **Si el cliente tiene entre 60-65 años sin continuidad:**
-        - Recomendar MSLD, MINT, MNAC o AM05
-        - Evitar AM18, AM17 y AM15
+- Recomendar MSLD, MINT, MNAC o AM05
+- Evitar AM18, AM17 y AM15
         
         **Si el cliente tiene continuidad:**
-        - ✅ Todas las edades son válidas
-        - ✅ Aplicar descuento del 15%
-        - ✅ Mayor flexibilidad en la selección
+- ✅ Todas las edades son válidas
+- ✅ Aplicar descuento del 15%
+- ✅ Mayor flexibilidad en la selección
         """)
+
+# ==================== MÓDULO 5: REGISTRO DE USO (LOG) ====================
+
+elif menu == "📜 Registro de Uso":
+    st.header("📜 Registro de Uso")
+
+    df_log = leer_log()
+
+    if df_log.empty:
+        st.info("Aún no hay registros.")
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total de eventos", len(df_log))
+        col2.metric("Cotizaciones calculadas", int((df_log['evento'] == "Cotización calculada").sum()))
+        col3.metric("Sesiones distintas", df_log['sesion_id'].nunique())
+        col4.metric("Usuarios distintos", df_log['usuario'].nunique() if 'usuario' in df_log.columns else 0)
+
+        eventos = st.multiselect("Filtrar por evento", sorted(df_log['evento'].unique()))
+        if eventos:
+            df_log = df_log[df_log['evento'].isin(eventos)]
+
+        # Más recientes primero
+        st.dataframe(df_log.iloc[::-1], use_container_width=True)
+
+        st.download_button(
+            "📥 Descargar registro (CSV)",
+            data=df_log.to_csv(index=False).encode("utf-8-sig"),
+            file_name="registro_uso.csv",
+            mime="text/csv",
+        )
 
 # Footer
 st.markdown("---")
@@ -1036,6 +1066,5 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-# rebuild trigger
 
 
